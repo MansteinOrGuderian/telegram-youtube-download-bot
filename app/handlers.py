@@ -2,12 +2,13 @@
 Telegram message and callback handlers.
 
 Flow:
-    1. User sends a URL or search query
-    2. Bot resolves/searches → shows a list of candidates as inline buttons
-    3. User taps a result → bot downloads, tags, and sends the MP3
+  1. User sends a URL or search query
+  2. Bot resolves/searches → shows a list of candidates as inline buttons
+  3. User taps a result → bot downloads, tags, and sends the MP3
 """
 from __future__ import annotations
 
+import asyncio
 import re
 
 from telegram import (
@@ -23,9 +24,8 @@ from telegram.constants import ChatAction
 import config
 from logger import get_logger
 from app import history as hist
-import yt_download.search as yt_search
+from yt_download.search import search as yt_search_fn, resolve_url as yt_resolve_url, TrackResult
 from yt_download import download, apply_metadata, DownloadError
-from yt_download.search import TrackResult
 
 log = get_logger(__name__)
 
@@ -36,6 +36,7 @@ _YOUTUBE_URL_PATTERN = re.compile(
 
 # Prefix for inline keyboard callback data — format: "select:<video_id>"
 _CALLBACK_SELECT_PREFIX = "select:"
+_CALLBACK_CANCEL = "cancel"
 
 
 def _is_allowed(user_id: int) -> bool:
@@ -54,11 +55,12 @@ def _history_keyboard(user_id: int) -> ReplyKeyboardMarkup | None:
 
 
 def _results_keyboard(results: list[TrackResult]) -> InlineKeyboardMarkup:
-    """Inline keyboard: one button per search result."""
+    """Inline keyboard: one button per search result + cancel."""
     buttons = [
         [InlineKeyboardButton(r.display, callback_data=f"{_CALLBACK_SELECT_PREFIX}{r.video_id}")]
         for r in results
     ]
+    buttons.append([InlineKeyboardButton("❌ Відміна", callback_data=_CALLBACK_CANCEL)])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -104,7 +106,7 @@ async def _handle_url(
 ) -> None:
     assert update.effective_message is not None
     msg = await update.effective_message.reply_text("🔍 Перевіряю посилання…")
-    result = yt_search.resolve_url(url)
+    result = await asyncio.to_thread(yt_resolve_url, url)
 
     if result is None:
         await msg.edit_text(
@@ -124,7 +126,7 @@ async def _handle_search(
 ) -> None:
     assert update.effective_message is not None
     msg = await update.effective_message.reply_text("🔍 Шукаю…")
-    results = yt_search.search(query)
+    results = await asyncio.to_thread(yt_search_fn, query)
 
     if not results:
         await msg.edit_text("😕 Нічого не знайшов. Спробуй інший запит.")
@@ -145,6 +147,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
 
     assert query.data is not None
+    if query.data == _CALLBACK_CANCEL:
+        await query.edit_message_text("❌ Скасовано.")
+        return
+
     if not query.data.startswith(_CALLBACK_SELECT_PREFIX):
         return
 
@@ -177,8 +183,8 @@ async def _download_and_send(
             action=ChatAction.UPLOAD_DOCUMENT,
         )
 
-        mp3_path = download(track)
-        final_path = apply_metadata(mp3_path, track)
+        mp3_path = await asyncio.to_thread(download, track)
+        final_path = await asyncio.to_thread(apply_metadata, mp3_path, track)
 
         with open(final_path, "rb") as f:
             await context.bot.send_audio(

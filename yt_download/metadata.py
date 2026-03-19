@@ -30,11 +30,18 @@ log = get_logger(__name__)
 
 # Characters not allowed in filenames on Windows / Linux
 _UNSAFE_CHARS = re.compile(r'[\\/*?:"<>|]')
-
 _SEPARATOR = " - "
 
+# Matches feat. suffix in titles: "(feat. Bruno Mars)" / "[ft. X]" / "feat. X"
+_FEAT_IN_TITLE = re.compile(
+    r"\s*[\(\[]?(?:feat(?:uring)?\.?|ft\.?)\s+(.+?)[\)\]]?\s*$",
+    re.IGNORECASE,
+)
 
-# Filename
+
+def _feat_to_comma(artist: str) -> str:
+    """Convert 'A feat. B, C' to 'A, B, C' for ID3 artist tag."""
+    return re.sub(r"\s+(?:feat(?:uring)?\.?|ft\.?)\s+", ", ", artist, flags=re.IGNORECASE)
 
 def _sanitize(text: str) -> str:
     """Remove / replace characters illegal in filenames; preserve original case."""
@@ -47,10 +54,10 @@ def _sanitize(text: str) -> str:
 def _parse_featured(artist_raw: str) -> tuple[str, list[str]]:
     """
     Split 'Main Artist feat. A, B' into ('Main Artist', ['A', 'B']).
-    Handles: feat. / ft. / featuring / with (case-insensitive, with or without dot).
+    Handles: feat. / ft. / featuring (case-insensitive, with or without dot).
     """
     pattern = re.compile(
-        r"\s+(?:feat(?:uring)?\.?|ft\.?|with)\s+(.+)$",
+        r"\s+(?:feat(?:uring)?\.?|ft\.?)\s+(.+)$",
         re.IGNORECASE,
     )
     m = pattern.search(artist_raw)
@@ -59,8 +66,6 @@ def _parse_featured(artist_raw: str) -> tuple[str, list[str]]:
 
     main = artist_raw[: m.start()].strip()
     feat_raw = m.group(1)
-
-    # Split multiple featured artists by comma
     feats = [a.strip() for a in feat_raw.split(",") if a.strip()]
     return main, feats
 
@@ -69,9 +74,22 @@ def build_filename(track: TrackResult) -> str:
     """
     Build the final filename (without directory), e.g.:
         kryzhana - Десять років.mp3
-        Artist feat. A, B - Title.mp3
+        МУР feat. Олена Кравець - Суспільна Власність.mp3
+
+    feat. may come from the artist field OR be embedded in the title
+    (e.g. title='Суспільна Власність (feat. Олена Кравець)').
     """
     main_artist, feats = _parse_featured(track.artist)
+
+    # If no feat. in artist field, check the title
+    clean_title = track.title
+    if not feats:
+        m = _FEAT_IN_TITLE.search(track.title)
+        if m:
+            feat_raw = m.group(1)
+            feats = [a.strip() for a in feat_raw.split(",") if a.strip()]
+            # Remove feat. suffix from title
+            clean_title = track.title[: m.start()].strip()
 
     if feats:
         feat_str = ", ".join(feats)
@@ -79,7 +97,7 @@ def build_filename(track: TrackResult) -> str:
     else:
         artist_part = main_artist
 
-    name = f"{_sanitize(artist_part)}{_SEPARATOR}{_sanitize(track.title)}.mp3"
+    name = f"{_sanitize(artist_part)}{_SEPARATOR}{_sanitize(clean_title)}.mp3"
     return name
 
 
@@ -123,15 +141,21 @@ def apply_metadata(mp3_path: Path, track: TrackResult) -> Path:
     except ID3NoHeaderError:
         tags = ID3()
 
-    # Title (clean, no artist prefix)
-    tags["TIT2"] = TIT2(encoding=3, text=track.title)
+    # Title (clean — strip feat. suffix if present in title)
+    clean_title = _FEAT_IN_TITLE.sub("", track.title).strip()
+    tags["TIT2"] = TIT2(encoding=3, text=clean_title)
 
-    # Artist (full, with feat. if present)
-    tags["TPE1"] = TPE1(encoding=3, text=track.artist)
+    # Artist — comma-separated for multiple artists (feat. is for filename only)
+    # "Mark Ronson feat. Bruno Mars" -> "Mark Ronson, Bruno Mars"
+    artist_for_tag = _feat_to_comma(track.artist)
+    tags["TPE1"] = TPE1(encoding=3, text=artist_for_tag)
 
-    # Album (only if it's an album track, not a standalone single)
-    if track.album:
-        tags["TALB"] = TALB(encoding=3, text=track.album)
+    # Album — skip if album name matches track title (yt-dlp sets this for singles)
+    album = track.album
+    if album and album.lower() == clean_title.lower():
+        album = None
+    if album:
+        tags["TALB"] = TALB(encoding=3, text=album)
     elif "TALB" in tags:
         del tags["TALB"]
 

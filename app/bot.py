@@ -1,6 +1,7 @@
 """
 Telegram bot application setup and startup.
 """
+from telegram import constants
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -8,6 +9,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 import config
 from logger import get_logger
@@ -19,9 +21,18 @@ log = get_logger(__name__)
 def run() -> None:
     log.info("Building application…")
 
+    # Increase timeouts for large file uploads (default read_timeout=5s is too short)
+    request = HTTPXRequest(
+        connect_timeout=10,
+        read_timeout=60,
+        write_timeout=60,
+        media_write_timeout=120,
+    )
+
     app = (
         ApplicationBuilder()
         .token(config.BOT_TOKEN)
+        .request(request)
         .build()
     )
 
