@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    container_name: yt-music-bot
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    volumes:
+      # Persist logs outside the container
+      - ./logs:/app/logs

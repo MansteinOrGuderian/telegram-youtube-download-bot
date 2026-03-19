@@ -7,30 +7,28 @@ A Telegram bot that downloads **studio/album versions** of songs from YouTube an
 - 🔗 **URL input** — paste any YouTube or YouTube Music link
 - 🔍 **Smart search** — find songs by name or artist + name (typo-tolerant, caps-lock-insensitive)
 - 🎵 **Studio versions only** — automatically filters out lyric videos, official videos, mood videos, clips, etc.
-- 🏷️ **Rich metadata** — title, artist, album, year, and cover art embedded in every MP3
 - 🖼️ **Correct cover art** — single cover for singles, album cover for album tracks
 - 📋 **Download history** — last 10 downloaded tracks per user
-- 🐳 **Docker** — runs in a local container, no cloud needed
 
 ## Project structure
 
 ```
 telegram-youtube-download-bot/
 ├── app/                  # Telegram bot layer
+│   ├── __init__.py
+│   ├── __main__.py
 │   ├── bot.py            # Application setup & startup
 │   ├── handlers.py       # Message & command handlers
-│   └── history.py        # Per-user download history
+│   └── history.py        # User download history (inline suggestions)
 ├── yt_download/          # YouTube download layer
+│   ├── __init__.py
 │   ├── downloader.py     # yt-dlp wrapper
 │   ├── search.py         # Search + studio-version filtering
 │   └── metadata.py       # ID3 tagging & filename formatting
-├── logs/                 # Runtime logs (git-ignored)
-├── tmp/                  # Temporary download dir (git-ignored)
+├── logs/                 # Runtime logs
 ├── config.py             # Central config (reads .env)
 ├── logger.py             # Shared logging setup
-├── main.py               # Entry point
 ├── Dockerfile
 ├── docker-compose.yml
-├── requirements.txt
-└── .env
+└── requirements.txt
 ```

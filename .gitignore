@@ -1,0 +1,28 @@
+# Secrets
+.env
+
+# Python runtime
+.venv/
+venv/
+__pycache__/
+*.py[cod]               # compiled bytecode
+*.egg-info/
+dist/
+build/
+
+# Audio files & Downloaded tracks
+*.mp3
+*.m4a
+*.opus
+*.webm
+*.mp4
+
+# Logs
+logs/*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
