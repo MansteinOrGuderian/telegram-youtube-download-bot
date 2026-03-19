@@ -23,7 +23,7 @@ _EXCLUDE_PATTERNS: list[re.Pattern] = [
     for p in [
         r"\bofficial\s+(music\s+)?video\b",
         r"\bofficial\s+clip\b",
-        r"\bofficial\s+audio\b",   # often a static image video, not the raw track
+        r"\bofficial\s+audio\b",
         r"\blyric[s]?\s*(video)?\b",
         r"\blyrics?\b",
         r"\bmood\s+video\b",
@@ -79,7 +79,7 @@ class TrackResult:
 
     @property
     def display(self) -> str:
-        parts = [self.artist, "–", self.title]
+        parts = [self.artist, "-", self.title]
         if self.album:
             parts += [f"({self.album})"]
         if self.year:
