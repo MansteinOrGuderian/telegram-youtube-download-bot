@@ -2,6 +2,7 @@
 Telegram bot application setup and startup.
 """
 from telegram import constants
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -18,10 +19,20 @@ from app.handlers import cmd_start, handle_message, handle_callback
 log = get_logger(__name__)
 
 
+async def _error_handler(update: object, context: object) -> None:
+    from telegram.ext import ContextTypes
+    ctx = context  # type: ignore[assignment]
+    err = getattr(ctx, "error", None)
+    if isinstance(err, (NetworkError, TimedOut)):
+        log.warning("Network error (auto-retry): %s", err)
+    else:
+        log.exception("Unhandled error: %s", err)
+
+
 def run() -> None:
     log.info("Building application…")
 
-    # Increase timeouts for large file uploads (default read_timeout=5s is too short)
+    # Increase timeouts for large file uploads (default read_timeout=5s was too low)
     request = HTTPXRequest(
         connect_timeout=10,
         read_timeout=60,
@@ -39,6 +50,7 @@ def run() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(_error_handler)
 
     log.info("Bot is running. Press Ctrl+C to stop.")
     app.run_polling(drop_pending_updates=True)

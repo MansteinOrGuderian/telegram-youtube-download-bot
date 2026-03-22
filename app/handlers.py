@@ -9,6 +9,7 @@ Flow:
 from __future__ import annotations
 
 import asyncio
+import io
 import re
 
 from telegram import (
@@ -184,15 +185,18 @@ async def _download_and_send(
         )
 
         mp3_path = await asyncio.to_thread(download, track)
-        final_path = await asyncio.to_thread(apply_metadata, mp3_path, track)
+        final_path, cover_data, clean_artist, clean_title = await asyncio.to_thread(apply_metadata, mp3_path, track)
+
+        thumbnail = io.BytesIO(cover_data) if cover_data else None
 
         with open(final_path, "rb") as f:
             await context.bot.send_audio(
                 chat_id=effective_message.chat_id,
                 audio=f,
-                title=track.title,
-                performer=track.artist,
+                title=clean_title,
+                performer=clean_artist,
                 filename=final_path.name,
+                thumbnail=thumbnail,
             )
 
         hist.add(user.id, track.artist, track.title)

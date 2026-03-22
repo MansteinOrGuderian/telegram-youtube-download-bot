@@ -28,20 +28,19 @@ class _YtdlpLogger:
 
     def warning(self, msg: str) -> None:
         if "No supported JavaScript runtime" in msg:
-            return  # expected on systems without node/deno — not actionable
+            return
         log.debug("yt-dlp warning: %s", msg)
 
     def error(self, msg: str) -> None:
         log.debug("yt-dlp error: %s", msg)
 
-# Patterns that disqualify a result
-# Any title/description that matches one of these is NOT a studio version.
+
 _EXCLUDE_PATTERNS: list[re.Pattern] = [
     re.compile(p, re.IGNORECASE)
     for p in [
+        # English
         r"\bofficial\s+(music\s+)?video\b",
         r"\bofficial\s+clip\b",
-        r"\bofficial\s+audio\b",   # often a static image video, not the raw track
         r"\blyric[s]?\s*(video)?\b",
         r"\blyrics?\b",
         r"\bmood\s+video\b",
@@ -64,11 +63,22 @@ _EXCLUDE_PATTERNS: list[re.Pattern] = [
         r"\bbehind\s+the\s+scenes?\b",
         r"\blyric\s+visualizer\b",
         r"\bvisuali[sz]er\b",
-        r"\baudio\s+only\b",
+        r"\bvertical\s+video\b",
+        r"\bdemo\b",
+        # Ukrainian / Cyrillic
+        r"(?<![а-яіїєґА-ЯІЇЄҐa-zA-Z])демо(?![а-яіїєґА-ЯІЇЄҐa-zA-Z])",
+        r"(?<![а-яіїєґА-ЯІЇЄҐa-zA-Z])живий\s+виступ(?![а-яіїєґА-ЯІЇЄҐ])",
+        r"(?<![а-яіїєґА-ЯІЇЄҐa-zA-Z])живе\s+виконання(?![а-яіїєґА-ЯІЇЄҐ])",
+        r"(?<![а-яіїєґА-ЯІЇЄҐa-zA-Z])офіційне\s+відео(?![а-яіїєґА-ЯІЇЄҐ])",
+        r"(?<![а-яіїєґА-ЯІЇЄҐa-zA-Z])офіційний\s+кліп(?![а-яіїєґА-ЯІЇЄҐ])",
+        r"прем['\u2019\u02bcʼ]єра",
+        r"(?<![а-яіїєґА-ЯІЇЄҐa-zA-Z])слова(?![а-яіїєґА-ЯІЇЄҐ])",
+        r"(?<![а-яіїєґА-ЯІЇЄҐa-zA-Z])обкладинка(?![а-яіїєґА-ЯІЇЄҐ])",
+        r"(?<![а-яіїєґА-ЯІЇЄҐa-zA-Z])кавер(?![а-яіїєґА-ЯІЇЄҐ])",
+        r"(?<![а-яіїєґА-ЯІЇЄҐa-zA-Z])ремікс(?![а-яіїєґА-ЯІЇЄҐ])",
     ]
 ]
 
-# These patterns in the UPLOADER/CHANNEL name suggest a non-official source
 _CHANNEL_EXCLUDE: list[re.Pattern] = [
     re.compile(p, re.IGNORECASE)
     for p in [
@@ -77,9 +87,6 @@ _CHANNEL_EXCLUDE: list[re.Pattern] = [
         r"covers?(\s+nation)?$",
     ]
 ]
-
-# YouTube Music search prefix - returns studio tracks by default
-_YTM_PREFIX = "https://music.youtube.com/search?q="
 
 
 @dataclass
@@ -92,17 +99,39 @@ class TrackResult:
     duration_sec: int
     thumbnail_url: str
     url: str
-    score: float = 0.0          # relevance score (higher = better match)
+    channel: str = ""          # original YouTube channel name
+    score: float = 0.0
     from_ytmusic: bool = False
 
     @property
     def display(self) -> str:
-        parts = [self.artist, "–", self.title]
-        if self.album:
-            parts += [f"({self.album})"]
+        """Short label for Telegram inline keyboard button."""
+        artist = self.artist
+        title = self.title
+
+        # If artist came from channel (no dedicated artist field), and title contains
+        # "Real Artist - Real Title", extract the real artist from title instead
+        if self.channel and artist == self.channel and " - " in title:
+            parts = title.split(" - ", 1)
+            # Use title part after " - " as the display title, first part as artist
+            extracted_artist = parts[0].strip()
+            extracted_title = parts[1].strip()
+            # Only use if extracted artist looks more like a real artist (not too long)
+            if len(extracted_artist) < 50:
+                artist = extracted_artist
+                title = extracted_title
+
+        # Trim extra feat. artists — show only main + first feat.
+        artist = re.sub(
+            r"(feat\.\s+[^,]+),.*$", r"\1", artist, flags=re.IGNORECASE
+        ).strip()
+
+        label = f"{artist} - {title}"
         if self.year:
-            parts += [f"[{self.year}]"]
-        return " ".join(parts)
+            label += f" [{self.year}]"
+        if len(label) > 60:
+            label = label[:57] + "…"
+        return label
 
 
 def _is_studio(info: dict) -> bool:
@@ -116,7 +145,6 @@ def _is_studio(info: dict) -> bool:
             log.debug("Excluded by pattern %r: %s", pat.pattern, title)
             return False
 
-    # Check description only for patterns unlikely to appear in normal descriptions
     _DESC_PATTERNS = {r"\bmood\s+video\b", r"\blyric\s+visualizer\b", r"\bvisuali[sz]er\b"}
     for pat in _EXCLUDE_PATTERNS:
         if pat.pattern in _DESC_PATTERNS and pat.search(description[:300]):
@@ -132,19 +160,11 @@ def _is_studio(info: dict) -> bool:
 
 
 def _best_thumbnail_url(info: dict) -> str:
-    """
-    Return the highest-resolution thumbnail URL from the info dict.
-    yt-dlp provides a 'thumbnails' list sorted by quality, and a 'thumbnail'
-    shortcut. We prefer the largest by resolution, falling back to 'thumbnail'.
-    """
     thumbnails = info.get("thumbnails")
     if thumbnails:
-        # Filter entries that have a url and at least width info
         sized = [t for t in thumbnails if t.get("url") and t.get("width")]
         if sized:
-            best = max(sized, key=lambda t: t.get("width", 0))
-            return best["url"]
-        # Fallback: last entry (yt-dlp usually puts best last)
+            return max(sized, key=lambda t: t.get("width", 0))["url"]
         last = thumbnails[-1]
         if last.get("url"):
             return last["url"]
@@ -157,29 +177,35 @@ def _parse_result(info: dict, from_ytmusic: bool = False) -> Optional[TrackResul
         return None
 
     video_id = info.get("id", "")
-    # YouTube video IDs are always exactly 11 characters — filter out playlists/channels
     if not video_id or len(video_id) != 11:
         return None
 
-    # extract_flat returns "track" for YTMusic, "title" for regular YouTube
     title = info.get("track") or info.get("title", "")
 
-    # "artist" field can be comma-joined list — first is main, rest are featured
+    # Comma-separated artists — deduplicate, keep all (authoritative list from platform)
     artist_raw = (
         info.get("artist")
         or info.get("creator")
         or info.get("channel")
         or info.get("uploader", "")
     )
+    channel = info.get("channel") or info.get("uploader", "")
+
     if artist_raw and "," in artist_raw:
-        parts = [a.strip() for a in artist_raw.split(",") if a.strip()]
-        artist = f"{parts[0]} feat. {', '.join(parts[1:])}"
+        # Deduplicate case-insensitively, preserving original capitalisation of first occurrence
+        seen_lower: set[str] = set()
+        parts = []
+        for a in artist_raw.split(","):
+            a = a.strip()
+            if a and a.lower() not in seen_lower:
+                seen_lower.add(a.lower())
+                parts.append(a)
+        artist = f"{parts[0]} feat. {', '.join(parts[1:])}" if len(parts) > 1 else parts[0]
     else:
         artist = artist_raw.strip() if artist_raw else ""
 
     album = info.get("album") or None
 
-    # Validate year — yt-dlp sometimes returns bogus values
     year: Optional[int] = None
     for field in ("release_year", "upload_date"):
         raw = info.get(field)
@@ -193,15 +219,12 @@ def _parse_result(info: dict, from_ytmusic: bool = False) -> Optional[TrackResul
         except (ValueError, TypeError):
             continue
 
-    # extract_flat returns duration=0; treat it as unknown rather than 0
     duration = info.get("duration") or 0
     if duration > 600:
         log.debug("Excluded by duration (%ds): %s", duration, title)
         return None
 
     thumbnail = _best_thumbnail_url(info)
-    if not thumbnail:
-        log.debug("No thumbnail found for video_id=%s title=%r", video_id, title)
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     return TrackResult(
@@ -213,12 +236,12 @@ def _parse_result(info: dict, from_ytmusic: bool = False) -> Optional[TrackResul
         duration_sec=int(duration),
         thumbnail_url=thumbnail,
         url=url,
+        channel=channel,
         from_ytmusic=from_ytmusic,
     )
 
 
 def _ydl_search_opts(max_results: int = 10) -> dict:
-    """Regular YouTube search — extract_flat for speed."""
     return {
         "quiet": True,
         "no_warnings": True,
@@ -231,7 +254,6 @@ def _ydl_search_opts(max_results: int = 10) -> dict:
 
 
 def _ytm_search_opts(max_results: int = 10) -> dict:
-    """YouTube Music search — extract_flat for speed."""
     return {
         "quiet": True,
         "no_warnings": True,
@@ -261,8 +283,52 @@ def _fetch_info(url: str) -> Optional[dict]:
 
 
 def _score(result: TrackResult, query: str) -> float:
-    combined = f"{result.artist} {result.title}"
-    base = fuzz.token_set_ratio(query.lower(), combined.lower())
+    """
+    Relevance score 0-100.
+
+    Formula:
+      base = token_sort_ratio(query, artist+title) x 0.4
+            + title_word_coverage x 100 x 0.4
+            + channel_artist_match x 20
+
+    Bonuses: ytmusic +15, album +5
+    Penalties: duration>600 -20, unrelated artist -25,
+               title-duplicates-artist (re-upload) -20
+    """
+    q = query.lower()
+    q_words = set(q.split())
+    title_lower = result.title.lower()
+    artist_lower = result.artist.lower()
+    channel_lower = result.channel.lower()
+
+    # 1. Token sort ratio on full "artist title"
+    combined = f"{artist_lower} {title_lower}"
+    sort_score = fuzz.token_sort_ratio(q, combined)
+
+    # 2. Title word coverage — fraction of query words found in title
+    title_words = set(title_lower.split())
+    coverage = len(q_words & title_words) / max(len(q_words), 1)
+    # Also penalise if title is a strict subset of query (e.g. "Secret Society" ⊂ "Secret Society Neoperreo")
+    if title_words and title_words < q_words:
+        coverage *= 0.3
+
+    # 3. Channel-artist match bonus (0-20)
+    artist_main = re.sub(
+        r"\s+(?:feat(?:uring)?\.?|ft\.?)\s+.+$", "", result.artist, flags=re.IGNORECASE
+    ).strip().lower()
+    channel_match = fuzz.token_set_ratio(artist_main, channel_lower)
+    if channel_match >= 80:
+        channel_bonus = 20
+    elif channel_match >= 50:
+        channel_bonus = 10
+    else:
+        channel_bonus = 0
+
+    base = sort_score * 0.4 + coverage * 100 * 0.4 + channel_bonus
+
+    # Hard penalty: if title shares no words with query, this is almost certainly wrong
+    if coverage == 0:
+        base -= 30
 
     bonus = 0.0
     if result.from_ytmusic:
@@ -271,6 +337,35 @@ def _score(result: TrackResult, query: str) -> float:
         bonus += 5
     if result.duration_sec > 600:
         bonus -= 20
+
+    # Artist in query check
+    artist_main_words = set(artist_main.split())
+    if artist_main_words & q_words:
+        bonus += 10
+    elif fuzz.partial_ratio(artist_main, q) < 50:
+        bonus -= 25
+
+    # Penalise if feat. artists contain names not in query and not matching channel
+    # e.g. "Zayn feat. Sia Andrew Lambrou" when query is "Zayn Dusk till Dawn"
+    feat_match = re.search(
+        r"feat(?:uring)?\.?\s+(.+)$", result.artist, flags=re.IGNORECASE
+    )
+    if feat_match:
+        feat_part = feat_match.group(1).lower()
+        feat_words = set(re.sub(r"[,;&]", " ", feat_part).split())
+        # Words in feat. that are in neither query nor channel are suspicious
+        unknown = feat_words - q_words - set(channel_lower.split())
+        if len(unknown) > 1:
+            bonus -= 15 * (len(unknown) - 1)
+
+    # Re-upload penalty: title starts with "Artist - " pattern
+    if " - " in result.title:
+        first_seg = result.title.split(" - ")[0].strip().lower()
+        first_seg_words = set(first_seg.split())
+        if fuzz.ratio(first_seg, artist_lower) > 60 or fuzz.partial_ratio(artist_lower, first_seg) > 80:
+            bonus -= 20
+        if len(artist_main_words & first_seg_words) >= len(artist_main_words):
+            bonus -= 15
 
     return min(base + bonus, 100.0)
 
@@ -286,26 +381,27 @@ def search(query: str, max_results: int = 8) -> list[TrackResult]:
     results: list[TrackResult] = []
     seen: set[str] = set()
 
-    # 1. YouTube Music — flat search for IDs, enrich top results one by one
-    ytm_url = f"https://music.youtube.com/search?q={query.replace(' ', '+')}"
+    # 1. YouTube Music — flat search for IDs, then enrich each with full metadata
+    # Use Songs-only filter (sp param) for more precise results
+    ytm_url = f"https://music.youtube.com/search?q={query.replace(' ', '+')}&sp=EgWKAQIIAWoKEAMQBBAJEAoQBQ%3D%3D"
+    _flat_fetch = max_results * 3  # fetch 3x more to account for non-song entries
     try:
-        with yt_dlp.YoutubeDL(_ytm_search_opts(max_results)) as ydl:
+        with yt_dlp.YoutubeDL(_ytm_search_opts(_flat_fetch)) as ydl:
             info = ydl.extract_info(ytm_url, download=False)
             flat_entries = info.get("entries", []) if info else []
 
         enriched = 0
         for entry in flat_entries:
-            if enriched >= max_results:
+            if enriched >= max_results + 2:  # fetch a few extra to filter unavailable
                 break
             if not entry:
                 continue
             video_id = entry.get("id", "")
             if not video_id or len(video_id) != 11 or video_id in seen:
                 continue
-            url = f"https://www.youtube.com/watch?v={video_id}"
-            full = _fetch_info(url)
+            full = _fetch_info(f"https://www.youtube.com/watch?v={video_id}")
             if full is None:
-                continue  # unavailable — skip without counting
+                continue
             enriched += 1
             r = _parse_result(full, from_ytmusic=True)
             if r:
@@ -328,7 +424,6 @@ def search(query: str, max_results: int = 8) -> list[TrackResult]:
                         r = _parse_result(entry, from_ytmusic=False)
                         if r:
                             r.score = _score(r, query)
-                            # Skip low-relevance YT results if we already have YTMusic hits
                             if ytmusic_count > 0 and r.score < 50:
                                 continue
                             results.append(r)
@@ -337,10 +432,15 @@ def search(query: str, max_results: int = 8) -> list[TrackResult]:
             log.warning("YouTube search failed: %s", exc)
 
     results.sort(key=lambda r: r.score, reverse=True)
-    # Drop clearly irrelevant results (score below threshold)
     results = [r for r in results if r.score >= 30]
     top = results[:max_results]
     log.info("Found %d studio candidates (from %d total)", len(top), len(results))
+    for i, r in enumerate(top, 1):
+        log.debug(
+            "  #%d [%.1f] %s - %s | ch=%r dur=%ds album=%r year=%s ytm=%s",
+            i, r.score, r.artist, r.title,
+            r.channel, r.duration_sec, r.album, r.year, r.from_ytmusic,
+        )
     return top
 
 
