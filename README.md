@@ -8,7 +8,7 @@ A Telegram bot that downloads **studio/album versions** of songs from YouTube an
 - 🔍 **Smart search** — find songs by name or artist + name (typo-tolerant, caps-lock-insensitive)
 - 🎵 **Studio versions only** — automatically filters out lyric videos, official videos, live performances, remixes, etc.
 - 🖼️ **High-quality cover art** — 3000×3000 from iTunes, YouTube thumbnail as fallback
-- 📋 **Download history** — last 10 downloads shown as quick-reply suggestions (Google-style)
+- 📋 **Download history** — last 10 downloads shown by `/history` command
 
 ## Bot usage
 
@@ -19,20 +19,21 @@ A Telegram bot that downloads **studio/album versions** of songs from YouTube an
 | Search by title          | `Uptown Funk`                                   |
 | Search by artist + title | `Bruno Mars Uptown Funk`                        |
 
-After a text search the bot shows a list of candidates as inline buttons. Tap a track to download it, or press ❌ to cancel. When you start a new search, your last 10 downloads appear as quick-reply suggestions.
+After a text search the bot shows a list of candidates as inline buttons. Tap a track to download it, or press ❌ to cancel. Use `/history` to see your last downloaded tracks.
+
 
 ## File naming & tags
 
 Filename format: `Artist feat. FeatArtist - Title.mp3`
 
-| Tag          | Source                                                            |
-|--------------|-------------------------------------------------------------------|
-| Title        | iTunes (clean — no feat. suffix, no Radio Edit)                   |
-| Artist       | iTunes main artist + feat. artists from YouTube, separated by `;` |
-| Album artist | Main artist only (no feat.)                                       |
-| Album        | iTunes collection name; omitted for standalone singles            |
-| Year         | iTunes release date                                               |
-| Cover art    | iTunes 3000×3000; YouTube thumbnail as fallback                   |
+| Tag          | Source                                                    |
+|--------------|-----------------------------------------------------------|
+| Title        | iTunes → Deezer → YouTube                                 |
+| Artist       | iTunes → Deezer (stage names, no real names) → YouTube    |
+| Album artist | Main artist only (no feat.)                               |
+| Album        | iTunes → Deezer → YouTube; omitted for standalone singles |
+| Year         | iTunes → Deezer → YouTube                                 |
+| Cover art    | iTunes 3000×3000 → Deezer 1000×1000 → YouTube thumbnail   |
 
 ## Project structure
 
