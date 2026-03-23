@@ -68,7 +68,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• посилання на YouTube або YouTube Music\n"
         "• або назву треку / виконавець + назва\n\n"
         "Я знайду студійну версію і скину MP3 з тегами 🎵\n\n"
-        "📋 /history — останні 10 завантажень"
+        "📋 /history — останні завантаження"
     )
     await update.effective_message.reply_text(text, reply_markup=ReplyKeyboardRemove())
 
@@ -170,7 +170,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("⚠️ Результат більше недоступний. Спробуй ще раз.")
         return
 
-    await query.edit_message_text(f"⬇️ Завантажую: {result.display}…")
+    await query.edit_message_text(f"⬇️ Завантажую…")
     await _download_and_send(update, context, result)
 
 
@@ -192,6 +192,11 @@ async def _download_and_send(
 
         mp3_path = await asyncio.to_thread(download, track)
         final_path, cover_data, clean_artist, clean_title = await asyncio.to_thread(apply_metadata, mp3_path, track)
+
+        try:
+            await effective_message.edit_text(f"⬇️ {clean_artist} – {clean_title}")
+        except Exception:
+            pass
 
         thumbnail = io.BytesIO(cover_data) if cover_data else None
 

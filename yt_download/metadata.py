@@ -230,7 +230,7 @@ def _itunes_lookup(artist: str, title: str) -> Optional[dict]:
                 r_collection = r.get("collectionName", "") or ""
                 a_score = fuzz.token_set_ratio(clean_artist.lower(), r_artist.lower())
                 log.debug("  fallback candidate: %r – %r | collection=%r a_score=%d",
-                          r_artist, r_title_raw2, r_collection, a_score)
+                        r_artist, r_title_raw2, r_collection, a_score)
                 if a_score < 50:
                     continue
                 is_single_col = bool(re.search(r"\bsingle\b|\bep\b", r_collection, re.IGNORECASE))
@@ -254,8 +254,8 @@ def _itunes_lookup(artist: str, title: str) -> Optional[dict]:
             log.debug("iTunes fallback failed: %s", exc)
 
     log.debug("iTunes match: score=%.0f artist=%r title=%r collection=%r type=%s",
-              best_score, best_result.get("artistName"), best_result.get("trackName"),
-              best_result.get("collectionName"), best_result.get("collectionType"))
+            best_score, best_result.get("artistName"), best_result.get("trackName"),
+            best_result.get("collectionName"), best_result.get("collectionType"))
     return best_result
 
 
@@ -268,15 +268,81 @@ def _cover_from_itunes_result(result: dict) -> Optional[bytes]:
     return _fetch_cover(url)
 
 
-def _get_cover(track: TrackResult, itunes_result: Optional[dict]) -> Optional[bytes]:
-    """Fetch cover art: iTunes result first, then YouTube thumbnail as fallback."""
+def _deezer_lookup(artist: str, title: str) -> Optional[dict]:
+    """
+    Search Deezer API for the track (no auth required).
+    Returns a result dict with keys: title, artist_name, album_title,
+    album_cover, release_date — or None if no confident match.
+    """
+    clean_artist = re.sub(r"\s+(?:feat(?:uring)?\.?|ft\.?)\s+.+$", "", artist, flags=re.IGNORECASE).strip()
+    clean_title = _FEAT_IN_TITLE.sub("", title).strip()
+    clean_title = _TITLE_SUFFIXES.sub("", clean_title).strip()
+
+    query = f"{clean_artist} {clean_title}"
+    try:
+        resp = httpx.get(
+            "https://api.deezer.com/search",
+            params={"q": query, "limit": 10},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("data", [])
+    except Exception as exc:
+        log.warning("Deezer search failed for %r: %s", query, exc)
+        return None
+
+    if not results:
+        log.debug("Deezer: no results for %r", query)
+        return None
+
+    best: Optional[dict] = None
+    best_score = 0.0
+    for r in results:
+        r_artist = r.get("artist", {}).get("name", "")
+        r_title = r.get("title", "")
+
+        artist_score = fuzz.token_set_ratio(clean_artist.lower(), r_artist.lower())
+        title_score = fuzz.token_set_ratio(clean_title.lower(), r_title.lower())
+
+        if artist_score < 50:
+            continue
+        score = artist_score * 0.5 + title_score * 0.5
+        if score > best_score:
+            best_score = score
+            best = r
+
+    if best_score < 60 or best is None:
+        log.debug("Deezer: no confident match for %r (best score %.0f)", query, best_score)
+        return None
+
+    album = best.get("album", {})
+    result = {
+        "title": best.get("title", ""),
+        "artist_name": best.get("artist", {}).get("name", ""),
+        "album_title": album.get("title", ""),
+        "album_cover": album.get("cover_xl") or album.get("cover_big") or album.get("cover", ""),
+        "release_date": best.get("release_date", ""),
+    }
+    log.debug("Deezer match: score=%.0f artist=%r title=%r album=%r",
+                best_score, result["artist_name"], result["title"], result["album_title"])
+    return result
+
+
+def _get_cover(track: TrackResult, itunes_result: Optional[dict], deezer_result: Optional[dict]) -> Optional[bytes]:
+    """Fetch cover art: iTunes (3000×3000) → Deezer (1000×1000) → YouTube thumbnail."""
     if itunes_result:
         cover = _cover_from_itunes_result(itunes_result)
         if cover:
             log.debug("Cover art: iTunes ✓")
             return cover
 
-    log.debug("Cover art: iTunes miss — falling back to YouTube thumbnail")
+    if deezer_result:
+        cover = _fetch_cover(deezer_result["album_cover"])
+        if cover:
+            log.debug("Cover art: Deezer ✓")
+            return cover
+
+    log.debug("Cover art: falling back to YouTube thumbnail")
     return _fetch_cover(track.thumbnail_url)
 
 
@@ -301,12 +367,19 @@ def apply_metadata(mp3_path: Path, track: TrackResult) -> tuple[Path, Optional[b
 
     itunes = _itunes_lookup(main_artist, base_title)
 
-    # Title
-    # iTunes trackName is clean (no feat., no "Radio Edit")
+    # Deezer lookup — used as fallback when iTunes has no result
+    deezer: Optional[dict] = None
+    if not itunes:
+        deezer = _deezer_lookup(main_artist, base_title)
+
+    # Title — iTunes first, Deezer second, YouTube fallback
     if itunes:
         clean_title = itunes["trackName"]
         # Strip any feat. or version suffix iTunes might include
         clean_title = _FEAT_IN_TITLE.sub("", clean_title).strip()
+        clean_title = _TITLE_SUFFIXES.sub("", clean_title).strip()
+    elif deezer and deezer["title"]:
+        clean_title = _FEAT_IN_TITLE.sub("", deezer["title"]).strip()
         clean_title = _TITLE_SUFFIXES.sub("", clean_title).strip()
     else:
         clean_title = base_title
@@ -336,6 +409,19 @@ def apply_metadata(mp3_path: Path, track: TrackResult) -> tuple[Path, Optional[b
             filename_artist = f"{itunes_parts[0]} feat. {', '.join(itunes_parts[1:])}"
         else:
             filename_artist = itunes_parts[0]
+    elif deezer and deezer.get("artist_name"):
+        # Deezer returns proper stage names — use instead of raw YouTube artist field
+        dz_main = deezer["artist_name"]
+        # Feat. artists may appear in Deezer title
+        dz_feats: list[str] = []
+        m_dz = _FEAT_IN_TITLE.search(deezer.get("title", ""))
+        if m_dz:
+            dz_feats = [a.strip() for a in _feat_group(m_dz).split(",") if a.strip()]
+        all_artists = list(dict.fromkeys([dz_main] + dz_feats))
+        if len(all_artists) > 1:
+            filename_artist = f"{all_artists[0]} feat. {', '.join(all_artists[1:])}"
+        else:
+            filename_artist = all_artists[0]
     else:
         all_artists = list(dict.fromkeys([main_artist] + feats))
         if len(all_artists) > 1:
@@ -363,6 +449,11 @@ def apply_metadata(mp3_path: Path, track: TrackResult) -> tuple[Path, Optional[b
         album = track.album
         if album and album.lower() == clean_title.lower():
             album = None
+        # Deezer album fallback
+        if not album and deezer and deezer.get("album_title"):
+            dz_album = deezer["album_title"]
+            if dz_album.lower() != clean_title.lower():
+                album = dz_album
     if album:
         tags["TALB"] = TALB(encoding=3, text=album)
     elif "TALB" in tags:
@@ -375,11 +466,16 @@ def apply_metadata(mp3_path: Path, track: TrackResult) -> tuple[Path, Optional[b
             year = int(itunes["releaseDate"][:4])
         except (ValueError, TypeError):
             pass
+    elif deezer and deezer.get("release_date"):
+        try:
+            year = int(deezer["release_date"][:4])
+        except (ValueError, TypeError):
+            pass
     if year:
         tags["TDRC"] = TDRC(encoding=3, text=str(year))
 
     # Cover art
-    cover_data = _get_cover(track, itunes)
+    cover_data = _get_cover(track, itunes, deezer)
     if cover_data:
         tags.delall("APIC")
         tags["APIC:"] = APIC(
@@ -393,7 +489,8 @@ def apply_metadata(mp3_path: Path, track: TrackResult) -> tuple[Path, Optional[b
         log.warning("No cover art found for '%s'", clean_title)
 
     tags.save(str(mp3_path), v2_version=3)
-    log.debug("ID3 tags written for '%s' (iTunes: %s)", clean_title, "✓" if itunes else "✗")
+    log.debug("ID3 tags written for '%s' (iTunes: %s  Deezer: %s)",
+                clean_title, "✓" if itunes else "✗", "✓" if deezer else "✗")
 
     # Rename
     # Build a synthetic TrackResult with cleaned data for filename

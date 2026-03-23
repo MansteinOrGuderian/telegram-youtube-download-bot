@@ -6,11 +6,13 @@ live performances, covers, remixes, etc.).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace as dc_replace
 from typing import Optional
 
 import yt_dlp
 from rapidfuzz import fuzz
+import httpx
 
 from logger import get_logger
 
@@ -126,7 +128,7 @@ class TrackResult:
             r"(feat\.\s+[^,]+),.*$", r"\1", artist, flags=re.IGNORECASE
         ).strip()
 
-        label = f"{artist} - {title}"
+        label = f"{artist} – {title}"
         if self.year:
             label += f" [{self.year}]"
         if len(label) > 60:
@@ -282,14 +284,85 @@ def _fetch_info(url: str) -> Optional[dict]:
         return None
 
 
+def _deezer_enrich_one(track: TrackResult) -> TrackResult:
+    """
+    Query Deezer for a single track and return updated TrackResult with
+    clean artist name if found. Returns original if no confident match.
+    Only runs when artist field likely contains real names (has feat. from YouTube).
+    """
+    # Only enrich if artist has feat. — that's where real names appear
+    if " feat. " not in track.artist.lower():
+        return track
+
+    main_artist = re.sub(
+        r"\s+(?:feat(?:uring)?\.?|ft\.?)\s+.+$", "", track.artist, flags=re.IGNORECASE
+    ).strip()
+    clean_title = re.sub(
+        r"\s*[\(\[]\s*(?:feat(?:uring)?\.?|ft\.?)\s+[^\)\]]+[\)\]]", "", track.title, flags=re.IGNORECASE
+    ).strip()
+
+    try:
+        resp = httpx.get(
+            "https://api.deezer.com/search",
+            params={"q": f"{main_artist} {clean_title}", "limit": 5},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+    except Exception:
+        return track
+
+    for r in data:
+        r_artist = r.get("artist", {}).get("name", "")
+        r_title = r.get("title", "")
+        if fuzz.token_set_ratio(main_artist.lower(), r_artist.lower()) < 60:
+            continue
+        if fuzz.token_set_ratio(clean_title.lower(), r_title.lower()) < 60:
+            continue
+
+        # Build clean artist from Deezer — check for feat. in title
+        feat_match = re.search(
+            r"[\(\[]\s*(?:feat(?:uring)?\.?|ft\.?)\s+([^\)\]]+)[\)\]]",
+            r_title, re.IGNORECASE,
+        )
+        if feat_match:
+            feat_str = feat_match.group(1).strip()
+            clean_artist = f"{r_artist} feat. {feat_str}"
+        else:
+            clean_artist = r_artist
+
+        if clean_artist != track.artist:
+            log.debug("Deezer enriched artist: %r → %r", track.artist, clean_artist)
+            return dc_replace(track, artist=clean_artist)
+        return track
+
+    return track
+
+
+def _deezer_enrich_top(results: list[TrackResult]) -> list[TrackResult]:
+    """Enrich top results with Deezer artist data in parallel."""
+    if not results:
+        return results
+    enriched = list(results)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        future_to_idx = {ex.submit(_deezer_enrich_one, r): i for i, r in enumerate(results)}
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                enriched[idx] = future.result()
+            except Exception:
+                pass
+    return enriched
+
+
 def _score(result: TrackResult, query: str) -> float:
     """
-    Relevance score 0-100.
+    Relevance score 0–100.
 
     Formula:
-      base = token_sort_ratio(query, artist+title) x 0.4
-            + title_word_coverage x 100 x 0.4
-            + channel_artist_match x 20
+      base = token_sort_ratio(query, artist+title) × 0.4
+            + title_word_coverage × 100 × 0.4
+            + channel_artist_match × 20
 
     Bonuses: ytmusic +15, album +5
     Penalties: duration>600 -20, unrelated artist -25,
@@ -312,7 +385,7 @@ def _score(result: TrackResult, query: str) -> float:
     if title_words and title_words < q_words:
         coverage *= 0.3
 
-    # 3. Channel-artist match bonus (0-20)
+    # 3. Channel-artist match bonus (0–20)
     artist_main = re.sub(
         r"\s+(?:feat(?:uring)?\.?|ft\.?)\s+.+$", "", result.artist, flags=re.IGNORECASE
     ).strip().lower()
@@ -367,6 +440,14 @@ def _score(result: TrackResult, query: str) -> float:
         if len(artist_main_words & first_seg_words) >= len(artist_main_words):
             bonus -= 15
 
+    # Extra penalty: channel/artist unrelated to query but title matches query well
+    # e.g. "patzyuk" uploading "Мертвий півень - Поцілунок" — patzyuk not in query
+    channel_words = set(channel_lower.split())
+    artist_in_query = bool(artist_main_words & q_words) or fuzz.partial_ratio(artist_main, q) >= 60
+    channel_in_query = bool(channel_words & q_words) or fuzz.partial_ratio(channel_lower, q) >= 60
+    if not artist_in_query and not channel_in_query and coverage > 0:
+        bonus -= 35
+
     return min(base + bonus, 100.0)
 
 
@@ -381,10 +462,10 @@ def search(query: str, max_results: int = 8) -> list[TrackResult]:
     results: list[TrackResult] = []
     seen: set[str] = set()
 
-    # 1. YouTube Music — flat search for IDs, then enrich each with full metadata
-    # Use Songs-only filter (sp param) for more precise results
-    ytm_url = f"https://music.youtube.com/search?q={query.replace(' ', '+')}&sp=EgWKAQIIAWoKEAMQBBAJEAoQBQ%3D%3D"
-    _flat_fetch = max_results * 3  # fetch 3x more to account for non-song entries
+    # Normalise query — replace " - " separator (artist - title) with space for better YTMusic results
+    ytm_query = re.sub(r"\s+-\s+", " ", query)
+    ytm_url = f"https://music.youtube.com/search?q={ytm_query.replace(' ', '+')}&sp=EgWKAQIIAWoKEAMQBBAJEAoQBQ%3D%3D"
+    _flat_fetch = max_results * 3  # fetch 3× more to account for non-song entries
     try:
         with yt_dlp.YoutubeDL(_ytm_search_opts(_flat_fetch)) as ydl:
             info = ydl.extract_info(ytm_url, download=False)
@@ -414,7 +495,8 @@ def search(query: str, max_results: int = 8) -> list[TrackResult]:
     # 2. Regular YouTube — only if YTMusic didn't fill the list
     ytmusic_count = len(results)
     if ytmusic_count < max_results:
-        yt_query = f"ytsearch{max_results}:{query}"
+        yt_query_clean = re.sub(r"\s+-\s+", " ", query)
+        yt_query = f"ytsearch{max_results}:{yt_query_clean}"
         try:
             with yt_dlp.YoutubeDL(_ydl_search_opts(max_results)) as ydl:
                 info = ydl.extract_info(yt_query, download=False)
@@ -432,12 +514,16 @@ def search(query: str, max_results: int = 8) -> list[TrackResult]:
             log.warning("YouTube search failed: %s", exc)
 
     results.sort(key=lambda r: r.score, reverse=True)
-    results = [r for r in results if r.score >= 30]
+    results = [r for r in results if r.score >= 20]
     top = results[:max_results]
+
+    # Enrich artist names with Deezer (parallel, cleans up real names from YouTube)
+    top = _deezer_enrich_top(top)
+
     log.info("Found %d studio candidates (from %d total)", len(top), len(results))
     for i, r in enumerate(top, 1):
         log.debug(
-            "  #%d [%.1f] %s - %s | ch=%r dur=%ds album=%r year=%s ytm=%s",
+            "  #%d [%.1f] %s – %s | ch=%r dur=%ds album=%r year=%s ytm=%s",
             i, r.score, r.artist, r.title,
             r.channel, r.duration_sec, r.album, r.year, r.from_ytmusic,
         )
