@@ -52,7 +52,7 @@ _EXCLUDE_PATTERNS: list[re.Pattern] = [
         r"\binstrumental\b",
         r"\bslowed(\s*\+\s*reverb)?\b",
         r"\breverb\b",
-        r"\bspeedup\b",
+        r"\bsp(?:ed|eed)\s*up\b",
         r"\bnightcore\b",
         r"\bextended\s+mix\b",
         r"\bvideo\s+clip\b",

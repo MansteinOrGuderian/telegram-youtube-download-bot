@@ -1,7 +1,6 @@
 """
 Telegram bot application setup and startup.
 """
-from telegram import constants
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
@@ -14,7 +13,7 @@ from telegram.request import HTTPXRequest
 
 import config
 from logger import get_logger
-from app.handlers import cmd_start, handle_message, handle_callback
+from app.handlers import cmd_start, cmd_history, handle_message, handle_callback
 
 log = get_logger(__name__)
 
@@ -48,6 +47,7 @@ def run() -> None:
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(_error_handler)

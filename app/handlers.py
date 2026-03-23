@@ -2,9 +2,9 @@
 Telegram message and callback handlers.
 
 Flow:
-  1. User sends a URL or search query
-  2. Bot resolves/searches → shows a list of candidates as inline buttons
-  3. User taps a result → bot downloads, tags, and sends the MP3
+    1. User sends a URL or search query
+    2. Bot resolves/searches → shows a list of candidates as inline buttons
+    3. User taps a result → bot downloads, tags, and sends the MP3
 """
 from __future__ import annotations
 
@@ -16,8 +16,7 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
+    ReplyKeyboardRemove,
 )
 from telegram.ext import ContextTypes
 from telegram.constants import ChatAction
@@ -46,15 +45,6 @@ def _is_allowed(user_id: int) -> bool:
     return user_id in config.ALLOWED_USER_IDS
 
 
-def _history_keyboard(user_id: int) -> ReplyKeyboardMarkup | None:
-    """Return a reply keyboard with the user's recent downloads, or None."""
-    entries = hist.get(user_id)
-    if not entries:
-        return None
-    buttons = [[KeyboardButton(str(e))] for e in entries]
-    return ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
-
-
 def _results_keyboard(results: list[TrackResult]) -> InlineKeyboardMarkup:
     """Inline keyboard: one button per search result + cancel."""
     buttons = [
@@ -72,15 +62,31 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(user.id):
         return
 
-    keyboard = _history_keyboard(user.id)
     text = (
         "👋 Привіт!\n\n"
         "Надішли мені:\n"
         "• посилання на YouTube або YouTube Music\n"
         "• або назву треку / виконавець + назва\n\n"
-        "Я знайду студійну версію і скину MP3 з тегами 🎵"
+        "Я знайду студійну версію і скину MP3 з тегами 🎵\n\n"
+        "📋 /history — останні 10 завантажень"
     )
-    await update.effective_message.reply_text(text, reply_markup=keyboard)
+    await update.effective_message.reply_text(text, reply_markup=ReplyKeyboardRemove())
+
+
+async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.effective_user is not None
+    assert update.effective_message is not None
+    user = update.effective_user
+    if not _is_allowed(user.id):
+        return
+
+    entries = hist.get(user.id)
+    if not entries:
+        await update.effective_message.reply_text("📋 Історія порожня.")
+        return
+
+    lines = "\n".join(f"{i}. {e}" for i, e in enumerate(entries, 1))
+    await update.effective_message.reply_text(f"📋 Останні завантаження:\n\n{lines}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -199,7 +205,7 @@ async def _download_and_send(
                 thumbnail=thumbnail,
             )
 
-        hist.add(user.id, track.artist, track.title)
+        hist.add(user.id, clean_artist, clean_title)
         log.info("Sent '%s' to user %d", final_path.name, user.id)
 
         try:

@@ -19,6 +19,7 @@ build/
 
 # Logs
 logs/*.log
+logs/history.txt
 
 # IDE
 .idea/
