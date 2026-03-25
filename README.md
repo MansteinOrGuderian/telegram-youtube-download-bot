@@ -76,6 +76,25 @@ cp .env.example .env
 python -m app
 ```
 
+### Docker
+
+```bash
+cp .env.example .env
+# fill .env
+
+docker compose build # build first
+
+docker compose up -d # start
+
+docker compose restart # restart
+
+docker compose up -d --build # rebuild, after code update
+
+docker compose down # end session
+```
+
+Logs and download history are persisted in `./logs/` via a volume mount.
+
 ## Configuration
 
 All settings are read from a `.env` file in the project root.
